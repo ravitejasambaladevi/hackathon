@@ -22,7 +22,7 @@ st.info("Allow camera access")
 # ---------------- MODEL ----------------
 @st.cache_resource
 def load_model():
-    return YOLO("yolov8s")  # Change to your model path if custom
+    return YOLO("yolov8s")
 
 model = load_model()
 
@@ -85,7 +85,7 @@ class VideoProcessor(VideoProcessorBase):
         vehicle_detected = False
         risk_score = 0
 
-        # YOLO Detection
+        # YOLO
         for box in results[0].boxes:
             cls = model.names[int(box.cls[0])]
             if cls in IMPORTANT_CLASSES:
@@ -187,18 +187,25 @@ class VideoProcessor(VideoProcessorBase):
         if risk_score >= 50:
             if time.time() - self.last_saved_time > 10:
                 filename = f"{OUTPUT_DIR}/emergency_{int(time.time())}.jpg"
+
                 if cv2.imwrite(filename, frame_resized):
                     save_queue.put(filename)
-                    st.session_state.saved_images.append(filename)
                     self.last_saved_time = time.time()
 
         # DEBUG
         cv2.putText(frame_resized,f"Motion:{motion_score}",(20,300),
-                    cv2.FONT_HERSHEY_SIMPLEX,0.6,(255,0,0),2)
+                    cv2.FONT_HERSHEY_SIMPLEX,0.6,(255,255,0),2)
+
         cv2.putText(frame_resized,f"Risk:{risk_score}",(20,330),
                     cv2.FONT_HERSHEY_SIMPLEX,1,(255,0,0),2)
 
         return av.VideoFrame.from_ndarray(frame_resized,format="bgr24")
+
+# ---------------- UPDATE UI ----------------
+if "save_queue" not in st.session_state:
+    st.session_state.save_queue = Queue()
+
+save_queue = st.session_state.save_queue
 
 # ---------------- UI ----------------
 col1,col2 = st.columns([2,1])
@@ -221,6 +228,6 @@ with col2:
         st.error("⚠️ Emergency Detected")
 
     st.subheader("Captured Images")
+
     for img in st.session_state.saved_images:
-        # Convert BGR to RGB for Streamlit display
-        st.image(cv2.cvtColor(cv2.imread(img), cv2.COLOR_BGR2RGB), width=200)
+        st.image(img, width=200)
