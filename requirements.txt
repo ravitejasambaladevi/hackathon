@@ -6,4 +6,3 @@ torch
 torchvision
 ultralytics
 streamlit-webrtc
-# add any other packages your app uses
