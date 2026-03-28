@@ -2,13 +2,16 @@ import streamlit as st
 import cv2
 import math
 import time
+import os
 import numpy as np
 from ultralytics import YOLO
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
 import av
+from queue import Queue
 
 # ---------------- PAGE ----------------
 st.set_page_config(page_title="AI Emergency Detection", layout="wide")
+
 st.title("🚨 AI Emergency Detection System")
 st.info("Allow camera access")
 
@@ -24,12 +27,12 @@ IMPORTANT_CLASSES = ["person", "car", "motorcycle", "bus", "truck"]
 if "saved_images" not in st.session_state:
     st.session_state.saved_images = []
 
-# ---------------- RTC CONFIG ----------------
+# ---------------- RTC ----------------
 RTC_CONFIGURATION = RTCConfiguration({
     "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
 })
 
-# ---------------- FIRE DETECTION ----------------
+# ---------------- FIRE ----------------
 def detect_fire(frame):
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     mask1 = cv2.inRange(hsv, (0,120,200), (35,255,255))
@@ -37,8 +40,9 @@ def detect_fire(frame):
     combined = cv2.bitwise_or(mask1, mask2)
     return cv2.countNonZero(combined) / (frame.shape[0]*frame.shape[1])
 
-# ---------------- VIDEO PROCESSOR ----------------
+# ---------------- PROCESSOR ----------------
 class VideoProcessor(VideoProcessorBase):
+
     def __init__(self):
         self.person_history = []
         self.movement_buffer = []
@@ -70,36 +74,37 @@ class VideoProcessor(VideoProcessorBase):
         for box in results[0].boxes:
             cls = model.names[int(box.cls[0])]
             if cls in IMPORTANT_CLASSES:
-                x1, y1, x2, y2 = map(int, box.xyxy[0])
-                cv2.rectangle(frame_resized, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                x1,y1,x2,y2 = map(int, box.xyxy[0])
+                cv2.rectangle(frame_resized,(x1,y1),(x2,y2),(0,255,0),2)
 
                 if cls == "person":
-                    cx, cy = (x1+x2)//2, (y1+y2)//2
-                    current_centers.append((cx, cy))
-                elif cls in ["car", "bus", "truck", "motorcycle"]:
+                    cx = (x1+x2)//2
+                    cy = (y1+y2)//2
+                    current_centers.append((cx,cy))
+
+                if cls in ["car","bus","truck","motorcycle"]:
                     vehicle_detected = True
 
-        # UNCONSCIOUS DETECTION
+        # UNCONSCIOUS
         if current_centers:
             self.person_history.append(current_centers[0])
         if len(self.person_history) > 20:
             self.person_history.pop(0)
 
         if len(self.person_history) >= 2:
-            px, py = self.person_history[-2]
-            cx, cy = self.person_history[-1]
+            px,py = self.person_history[-2]
+            cx,cy = self.person_history[-1]
             dist = math.sqrt((cx-px)**2 + (cy-py)**2)
             self.movement_buffer.append(dist)
             if len(self.movement_buffer) > 10:
                 self.movement_buffer.pop(0)
-
             avg = np.median(self.movement_buffer)
 
             if avg < 35:
                 if self.still_start_time is None:
                     self.still_start_time = time.time()
                 elapsed = time.time() - self.still_start_time
-                cv2.putText(frame_resized, f"Still: {int(elapsed)}s", (20,40),
+                cv2.putText(frame_resized,f"Still: {int(elapsed)}s",(20,40),
                             cv2.FONT_HERSHEY_SIMPLEX,1,(0,255,255),2)
                 if elapsed > 15:
                     cv2.putText(frame_resized,"UNCONSCIOUS",(20,80),
@@ -108,13 +113,13 @@ class VideoProcessor(VideoProcessorBase):
             elif avg > 40:
                 self.still_start_time = None
 
-        # ACCIDENT DETECTION
-        gray = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2GRAY)
-        gray = cv2.GaussianBlur(gray, (21,21), 0)
+        # ACCIDENT
+        gray = cv2.cvtColor(frame_resized,cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray,(21,21),0)
         motion_score = 0
         if self.prev_gray is not None:
-            diff = cv2.absdiff(self.prev_gray, gray)
-            thresh = cv2.threshold(diff, 25, 255, cv2.THRESH_BINARY)[1]
+            diff = cv2.absdiff(self.prev_gray,gray)
+            thresh = cv2.threshold(diff,25,255,cv2.THRESH_BINARY)[1]
             motion_score = cv2.countNonZero(thresh)
         self.prev_gray = gray
 
@@ -124,14 +129,14 @@ class VideoProcessor(VideoProcessorBase):
                 self.accident_time = time.time()
         if self.accident_flag:
             if motion_score < 15000:
-                if time.time() - self.accident_time > 2:
+                if time.time()-self.accident_time > 2:
                     cv2.putText(frame_resized,"ACCIDENT",(20,120),
                                 cv2.FONT_HERSHEY_SIMPLEX,1,(0,0,255),3)
                     risk_score += 50
             else:
                 self.accident_flag = False
 
-        # FIRE DETECTION
+        # FIRE
         fire_ratio = detect_fire(frame_resized)
         cv2.putText(frame_resized,f"Fire:{fire_ratio:.2f}",(20,260),
                     cv2.FONT_HERSHEY_SIMPLEX,0.7,(0,255,255),2)
@@ -145,29 +150,29 @@ class VideoProcessor(VideoProcessorBase):
         else:
             self.fire_start_time = None
 
-        # SAVE EMERGENCY IMAGE IN SESSION STATE
+        # SAVE IN SESSION STATE (instead of filesystem)
         if risk_score >= 50:
             if time.time() - self.last_saved_time > 10:
                 st.session_state.saved_images.append(frame_resized)
                 self.last_saved_time = time.time()
 
-        # DEBUG INFO
+        # DEBUG
         cv2.putText(frame_resized,f"Motion:{motion_score}",(20,300),
                     cv2.FONT_HERSHEY_SIMPLEX,0.6,(255,255,0),2)
         cv2.putText(frame_resized,f"Risk:{risk_score}",(20,330),
                     cv2.FONT_HERSHEY_SIMPLEX,1,(255,0,0),2)
 
-        return av.VideoFrame.from_ndarray(frame_resized, format="bgr24")
+        return av.VideoFrame.from_ndarray(frame_resized,format="bgr24")
 
 # ---------------- UI ----------------
-col1, col2 = st.columns([2,1])
+col1,col2 = st.columns([2,1])
 
 with col1:
     webrtc_streamer(
         key="cam",
         video_processor_factory=VideoProcessor,
         rtc_configuration=RTC_CONFIGURATION,
-        media_stream_constraints={"video": True, "audio": False}
+        media_stream_constraints={"video":True,"audio":False}
     )
 
 with col2:
