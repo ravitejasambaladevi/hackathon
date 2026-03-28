@@ -21,7 +21,18 @@ def load_model():
     return YOLO("yolov8s")
 
 model = load_model()
+
 IMPORTANT_CLASSES = ["person", "car", "motorcycle", "bus", "truck"]
+
+# ---------------- OUTPUT ----------------
+OUTPUT_DIR = "outputs"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# ---------------- QUEUE ----------------
+if "save_queue" not in st.session_state:
+    st.session_state.save_queue = Queue()
+
+save_queue = st.session_state.save_queue
 
 # ---------------- SESSION ----------------
 if "saved_images" not in st.session_state:
@@ -70,7 +81,7 @@ class VideoProcessor(VideoProcessorBase):
         vehicle_detected = False
         risk_score = 0
 
-        # YOLO Detection
+        # YOLO
         for box in results[0].boxes:
             cls = model.names[int(box.cls[0])]
             if cls in IMPORTANT_CLASSES:
@@ -88,45 +99,60 @@ class VideoProcessor(VideoProcessorBase):
         # UNCONSCIOUS
         if current_centers:
             self.person_history.append(current_centers[0])
+
         if len(self.person_history) > 20:
             self.person_history.pop(0)
 
         if len(self.person_history) >= 2:
             px,py = self.person_history[-2]
             cx,cy = self.person_history[-1]
+
             dist = math.sqrt((cx-px)**2 + (cy-py)**2)
             self.movement_buffer.append(dist)
+
             if len(self.movement_buffer) > 10:
                 self.movement_buffer.pop(0)
+
             avg = np.median(self.movement_buffer)
 
             if avg < 35:
                 if self.still_start_time is None:
                     self.still_start_time = time.time()
+
                 elapsed = time.time() - self.still_start_time
+
                 cv2.putText(frame_resized,f"Still: {int(elapsed)}s",(20,40),
                             cv2.FONT_HERSHEY_SIMPLEX,1,(0,255,255),2)
+
                 if elapsed > 15:
                     cv2.putText(frame_resized,"UNCONSCIOUS",(20,80),
                                 cv2.FONT_HERSHEY_SIMPLEX,1,(0,0,255),3)
                     risk_score += 70
+
             elif avg > 40:
-                self.still_start_time = None
+                if self.movement_start_time is None:
+                    self.movement_start_time = time.time()
+                elif time.time()-self.movement_start_time > 2:
+                    self.still_start_time = None
+                    self.movement_start_time = None
 
         # ACCIDENT
         gray = cv2.cvtColor(frame_resized,cv2.COLOR_BGR2GRAY)
         gray = cv2.GaussianBlur(gray,(21,21),0)
+
         motion_score = 0
         if self.prev_gray is not None:
             diff = cv2.absdiff(self.prev_gray,gray)
             thresh = cv2.threshold(diff,25,255,cv2.THRESH_BINARY)[1]
             motion_score = cv2.countNonZero(thresh)
+
         self.prev_gray = gray
 
         if motion_score > 12000 and vehicle_detected:
             if not self.accident_flag:
                 self.accident_flag = True
                 self.accident_time = time.time()
+
         if self.accident_flag:
             if motion_score < 15000:
                 if time.time()-self.accident_time > 2:
@@ -138,11 +164,14 @@ class VideoProcessor(VideoProcessorBase):
 
         # FIRE
         fire_ratio = detect_fire(frame_resized)
+
         cv2.putText(frame_resized,f"Fire:{fire_ratio:.2f}",(20,260),
                     cv2.FONT_HERSHEY_SIMPLEX,0.7,(0,255,255),2)
+
         if fire_ratio > 0.1:
             if self.fire_start_time is None:
                 self.fire_start_time = time.time()
+
             if time.time()-self.fire_start_time > 1:
                 cv2.putText(frame_resized,"FIRE ALERT",(20,160),
                             cv2.FONT_HERSHEY_SIMPLEX,1,(0,0,255),3)
@@ -150,19 +179,29 @@ class VideoProcessor(VideoProcessorBase):
         else:
             self.fire_start_time = None
 
-        # SAVE IN SESSION STATE (instead of filesystem)
+        # SAVE
         if risk_score >= 50:
             if time.time() - self.last_saved_time > 10:
-                st.session_state.saved_images.append(frame_resized)
-                self.last_saved_time = time.time()
+                filename = f"{OUTPUT_DIR}/emergency_{int(time.time())}.jpg"
+
+                if cv2.imwrite(filename, frame_resized):
+                    save_queue.put(filename)
+                    self.last_saved_time = time.time()
 
         # DEBUG
         cv2.putText(frame_resized,f"Motion:{motion_score}",(20,300),
                     cv2.FONT_HERSHEY_SIMPLEX,0.6,(255,255,0),2)
+
         cv2.putText(frame_resized,f"Risk:{risk_score}",(20,330),
                     cv2.FONT_HERSHEY_SIMPLEX,1,(255,0,0),2)
 
         return av.VideoFrame.from_ndarray(frame_resized,format="bgr24")
+
+# ---------------- UPDATE UI ----------------
+if "save_queue" not in st.session_state:
+    st.session_state.save_queue = Queue()
+
+save_queue = st.session_state.save_queue
 
 # ---------------- UI ----------------
 col1,col2 = st.columns([2,1])
@@ -177,11 +216,14 @@ with col1:
 
 with col2:
     count = len(st.session_state.saved_images)
+
     st.subheader("Status")
     st.write(f"Saved Images: {count}")
+
     if count > 0:
         st.error("⚠️ Emergency Detected")
 
     st.subheader("Captured Images")
+
     for img in st.session_state.saved_images:
         st.image(img, width=200)
